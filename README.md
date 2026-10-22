@@ -10,7 +10,6 @@
    Скопировать Project URL и publishable-ключ в `config.js`.
 2. Vercel: импортировать этот репозиторий, добавить переменные `GEMINI_API_KEY` (или `ANTHROPIC_API_KEY`), `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`.
 3. Supabase → Authentication → URL Configuration: указать адрес сайта с Vercel (Site URL и Redirect URLs `https://адрес/**`).
-   Для входа через Google — включить провайдера Google в Authentication → Providers.
 
 **Проверка:** `cd tests && npm install && npm test` (база: `npm run test:db`, нужен `brew install postgresql@16`)
 

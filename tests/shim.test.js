@@ -67,8 +67,7 @@ function boot(backend, userId, extra, cfg = cfgTest) {
   let resolved = false; wn.claude.use('db').then(() => { resolved = true; });
   await wait(100);
   assert.equal(resolved, false); assert.ok(wn.document.querySelector('#odForm')); assert.ok(/OneDay/.test(wn.document.body.textContent)); ok('без входа: экран входа, приложение ждёт');
-  wn.document.querySelector('#odGoogle').click(); await wait(20);
-  assert.equal(be.oauthCalls.at(-1).provider, 'google'); assert.equal(be.oauthCalls.at(-1).options.redirectTo, 'https://od.test/'); ok('кнопка Google ведёт на вход Google и обратно');
+  assert.equal(wn.document.querySelector('#odGoogle'), null); ok('кнопки Google нет: вход только по почте');
 
   // выход чистит локальные данные приложения
   wa.localStorage.setItem('journal-ai-v2', 'x'); wa.localStorage.setItem('journal-font', 'f');
