@@ -58,9 +58,12 @@
         history.replaceState(null, '', location.pathname + location.search);
         return 'Ссылка из письма устарела или уже использована. Просто войдите по почте и паролю.';
       }
-      if (h.get('error') || new URLSearchParams(location.search).get('error')) {
+      var q = new URLSearchParams(location.search);
+      if (h.get('error') || q.get('error')) {
+        // причину от Supabase/Google показываем как есть: по ней видно, что поправить в настройках
+        var why = h.get('error_description') || q.get('error_description') || h.get('error') || q.get('error');
         history.replaceState(null, '', location.pathname);
-        return 'Не получилось войти через Google. Попробуйте ещё раз или войдите по почте и паролю.';
+        return 'Не получилось войти через Google (' + why + '). Попробуйте ещё раз или войдите по почте и паролю.';
       }
     } catch (e) { /* ничего */ }
     return '';
