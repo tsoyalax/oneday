@@ -2,7 +2,7 @@
   "name": "oneday-tests",
   "private": true,
   "scripts": {
-    "test": "node api.test.js && node shim.test.js && node app.test.js",
+    "test": "node api.test.js && node assistant.test.js && node shim.test.js && node app.test.js",
     "test:db": "sh db/run.sh"
   },
   "devDependencies": {
