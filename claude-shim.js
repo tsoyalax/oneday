@@ -62,6 +62,7 @@
       if (h.get('error') || q.get('error')) {
         // причину от Supabase/Google показываем как есть: по ней видно, что поправить в настройках
         var why = h.get('error_description') || q.get('error_description') || h.get('error') || q.get('error');
+        try { why = decodeURIComponent(why); } catch (e) { /* оставляем как есть */ }
         history.replaceState(null, '', location.pathname);
         return 'Не получилось войти через Google (' + why + '). Попробуйте ещё раз или войдите по почте и паролю.';
       }
