@@ -1,5 +1,5 @@
-// Vercel-функция: проксирует запросы приложения к Claude (распознавание скриншотов, AI-резюме).
-// Ключ ANTHROPIC_API_KEY хранится только в переменных окружения Vercel, в браузер он не попадает.
+// Vercel-функция: проксирует запросы помощника к ИИ — Gemini (если задан GEMINI_API_KEY) или Claude (ANTHROPIC_API_KEY).
+// Ключи хранятся только в переменных окружения Vercel, в браузер они не попадают.
 // Доступ только для вошедших в аккаунт (проверяем токен Supabase) + ограничение числа запросов.
 
 const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
@@ -43,8 +43,8 @@ module.exports = async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   if (req.method !== 'POST') return send(res, 405, fail('method_not_allowed', 'Только POST'));
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return send(res, 500, fail('unavailable', 'На сервере не задан ANTHROPIC_API_KEY'));
+  const geminiKey = process.env.GEMINI_API_KEY, apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!geminiKey && !apiKey) return send(res, 500, fail('unavailable', 'На сервере не задан ключ ИИ (GEMINI_API_KEY или ANTHROPIC_API_KEY)'));
 
   const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
   const uid = await whoIs(token);
@@ -66,49 +66,77 @@ module.exports = async (req, res) => {
   }
   if (total > MAX_TOTAL_B64) return send(res, 413, fail('prompt_too_large', 'Слишком большие изображения'));
 
-  const model = b.modelTier === 'fast'
+  const fast = b.modelTier === 'fast';
+  const system = mode === 'json' ? 'Отвечай только одним валидным JSON-объектом, без пояснений и без markdown.' : undefined;
+  const maxTokens = mode === 'json' ? 4000 : 1500;
+  const call = geminiKey
+    ? () => askGemini(geminiKey, fast, prompt, images, system, maxTokens, mode)
+    : () => askClaude(apiKey, fast, prompt, images, system, maxTokens);
+
+  const out = await call();
+  if (out.error) return send(res, out.status, out.error);
+  const text = out.text;
+  if (mode === 'json') {
+    const json = parseJson(text);
+    if (!json) return send(res, 422, fail('invalid_json', 'ИИ ответил не в том формате'));
+    return send(res, 200, { json });
+  }
+  return send(res, 200, { text });
+};
+
+// ошибка провайдера -> понятный приложению ответ
+function providerFail(status, detail) {
+  if (status === 429) return { status: 429, error: fail('rate_limited', 'Слишком много запросов подряд. Подождите минуту.') };
+  if (status === 413) return { status: 413, error: fail('prompt_too_large', 'Слишком много данных для одного запроса') };
+  if (status === 400 && /image/i.test(detail)) return { status: 400, error: fail('image_rejected', 'Изображение не принято') };
+  return { status: 502, error: fail('unavailable', 'Не удалось связаться с ИИ. Попробуйте позже.') };
+}
+
+async function post(url, headers, body) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 55000);
+  try {
+    return await fetch(url, { method: 'POST', signal: ctl.signal, headers: Object.assign({ 'content-type': 'application/json' }, headers), body: JSON.stringify(body) });
+  } catch (e) { return null; } finally { clearTimeout(timer); }
+}
+const timeoutFail = { status: 502, error: fail('unavailable', 'ИИ не ответил вовремя. Попробуйте ещё раз.') };
+
+async function askGemini(key, fast, prompt, images, system, maxTokens, mode) {
+  const model = fast
+    ? (process.env.GEMINI_MODEL_FAST || 'gemini-3.5-flash-lite')
+    : (process.env.GEMINI_MODEL || 'gemini-3.6-flash');
+  const parts = images.map(im => ({ inline_data: { mime_type: im.media_type, data: im.data } }));
+  parts.push({ text: prompt });
+  const body = { contents: [{ role: 'user', parts }], generationConfig: { maxOutputTokens: maxTokens } };
+  if (system) body.systemInstruction = { parts: [{ text: system }] };
+  if (mode === 'json') body.generationConfig.responseMimeType = 'application/json';
+  const r = await post('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent', { 'x-goog-api-key': key }, body);
+  if (!r) return timeoutFail;
+  if (!r.ok) {
+    let detail = ''; try { detail = (await r.json()).error.message; } catch (e) { /* ничего */ }
+    console.error('Gemini error', r.status, detail);
+    return providerFail(r.status, detail);
+  }
+  const data = await r.json();
+  const c = (data.candidates || [])[0];
+  return { text: ((c && c.content && c.content.parts) || []).map(x => x.text || '').join('') };
+}
+
+async function askClaude(key, fast, prompt, images, system, maxTokens) {
+  const model = fast
     ? (process.env.ANTHROPIC_MODEL_FAST || 'claude-haiku-5-5')
     : (process.env.ANTHROPIC_MODEL || 'claude-sonnet-5-5');
 
   const content = images.map(im => ({ type: 'image', source: { type: 'base64', media_type: im.media_type, data: im.data } }));
   content.push({ type: 'text', text: prompt });
-
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), 55000);
-  let r;
-  try {
-    r = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      signal: ctl.signal,
-      headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-      body: JSON.stringify({
-        model,
-        max_tokens: mode === 'json' ? 4000 : 1500,
-        system: mode === 'json' ? 'Отвечай только одним валидным JSON-объектом, без пояснений и без markdown.' : undefined,
-        messages: [{ role: 'user', content }]
-      })
-    });
-  } catch (e) {
-    clearTimeout(timer);
-    return send(res, 502, fail('unavailable', 'Claude не ответил вовремя. Попробуйте ещё раз.'));
-  }
-  clearTimeout(timer);
-
+  const r = await post('https://api.anthropic.com/v1/messages', { 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+    { model, max_tokens: maxTokens, system, messages: [{ role: 'user', content }] });
+  if (!r) return timeoutFail;
   if (!r.ok) {
     let detail = ''; try { detail = (await r.json()).error.message; } catch (e) { /* ничего */ }
     console.error('Anthropic error', r.status, detail);
-    if (r.status === 429) return send(res, 429, fail('rate_limited', 'Слишком много запросов подряд. Подождите минуту.'));
-    if (r.status === 413) return send(res, 413, fail('prompt_too_large', 'Слишком много данных для одного запроса'));
-    if (r.status === 400 && /image/i.test(detail)) return send(res, 400, fail('image_rejected', 'Изображение не принято'));
-    return send(res, 502, fail('unavailable', 'Не удалось связаться с Claude. Попробуйте позже.'));
+    return providerFail(r.status, detail);
   }
-
   const data = await r.json();
-  const text = (data.content || []).filter(x => x.type === 'text').map(x => x.text).join('');
-  if (mode === 'json') {
-    const json = parseJson(text);
-    if (!json) return send(res, 422, fail('invalid_json', 'Claude ответил не в том формате'));
-    return send(res, 200, { json });
-  }
-  return send(res, 200, { text });
-};
+  return { text: (data.content || []).filter(x => x.type === 'text').map(x => x.text).join('') };
+}

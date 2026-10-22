@@ -6,10 +6,11 @@ process.env.SUPABASE_URL = 'https://x.supabase.co';
 process.env.SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_test';
 
 let anthropicReply = { status: 200, body: { content: [{ type: 'text', text: '{"rows":[{"campaign":"A","spend":10}]}' }] } };
-let userOk = true, calls = [];
+let userOk = true, calls = [], uidReply = 'u1', geminiReply = null;
 global.fetch = async (url, opts) => {
   calls.push({ url, opts });
-  if (String(url).includes('/auth/v1/user')) return userOk ? { ok: true, json: async () => ({ id: 'u1' }) } : { ok: false, json: async () => ({}) };
+  if (String(url).includes('/auth/v1/user')) return userOk ? { ok: true, json: async () => ({ id: uidReply }) } : { ok: false, json: async () => ({}) };
+  if (String(url).includes('generativelanguage')) return { ok: geminiReply.status === 200, status: geminiReply.status, json: async () => geminiReply.body };
   return { ok: anthropicReply.status === 200, status: anthropicReply.status, json: async () => anthropicReply.body };
 };
 const mkRes = () => { const r = { headers: {}, setHeader(k, v) { r.headers[k] = v; }, status(c) { r.code = c; return r; }, json(b) { r.body = b; return r; } }; return r; };
@@ -49,5 +50,28 @@ let n = 0; const ok = (name) => { n++; console.log('PASS ' + name); };
   anthropicReply = { status: 200, body: { content: [{ type: 'text', text: 'ok' }] } };
   let last; for (let i = 0; i < 25; i++) last = await call({ prompt: 'p' });
   assert.equal(last.code, 429); ok('лимит запросов на человека работает');
+
+  // Gemini: если задан GEMINI_API_KEY, помощник работает через него
+  uidReply = 'u2'; process.env.GEMINI_API_KEY = 'gem-key';
+  geminiReply = { status: 200, body: { candidates: [{ content: { parts: [{ text: 'Привет' }, { text: ' мир' }] } }] } };
+  calls = [];
+  r = await call({ prompt: 'p' }); assert.deepEqual(r.body, { text: 'Привет мир' }); ok('Gemini: текстовый режим');
+  const g = calls.find(c => String(c.url).includes('generativelanguage'));
+  assert.ok(g && !calls.some(c => String(c.url).includes('anthropic'))); ok('Gemini: Claude не вызывается');
+  assert.ok(g.url.endsWith('/models/gemini-3.6-flash:generateContent')); assert.equal(g.opts.headers['x-goog-api-key'], 'gem-key'); assert.ok(!g.url.includes('gem-key')); ok('Gemini: модель по умолчанию, ключ в заголовке, не в адресе');
+  geminiReply = { status: 200, body: { candidates: [{ content: { parts: [{ text: '{"plan":[1]}' }] } }] } };
+  calls = [];
+  r = await call({ prompt: 'p', mode: 'json', images: [{ media_type: 'image/png', data: 'AAAA' }], modelTier: 'fast' });
+  assert.deepEqual(r.body.json, { plan: [1] }); ok('Gemini: json-режим разобран');
+  const gb = JSON.parse(calls.find(c => String(c.url).includes('generativelanguage')).opts.body);
+  assert.ok(calls.find(c => String(c.url).includes('generativelanguage')).url.includes('gemini-3.5-flash-lite')); assert.equal(gb.generationConfig.responseMimeType, 'application/json');
+  assert.equal(gb.contents[0].parts[0].inline_data.mime_type, 'image/png'); assert.equal(gb.contents[0].parts[1].text, 'p'); assert.ok(gb.systemInstruction); ok('Gemini: быстрая модель, картинка+текст, JSON-ответ');
+  geminiReply = { status: 429, body: { error: { message: 'quota' } } };
+  r = await call({ prompt: 'p' }); assert.equal(r.code, 429); assert.equal(r.body.error.code, 'rate_limited'); ok('Gemini: 429 -> rate_limited');
+  geminiReply = { status: 200, body: { candidates: [] } };
+  r = await call({ prompt: 'p', mode: 'json' }); assert.equal(r.code, 422); ok('Gemini: пустой ответ -> invalid_json');
+  assert.ok(!JSON.stringify(r.body).includes('gem-key')); ok('Gemini: ключ не утекает в ответ');
+  delete process.env.GEMINI_API_KEY; delete process.env.ANTHROPIC_API_KEY; uidReply = 'u3';
+  r = await call({ prompt: 'p' }); assert.equal(r.code, 500); ok('без ключей — понятная ошибка');
   console.log(`\nИтого: ${n} проверок прошло`);
 })().catch(e => { console.error('FAIL', e); process.exit(1); });
