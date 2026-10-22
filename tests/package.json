@@ -1,0 +1,11 @@
+{
+  "name": "oneday-tests",
+  "private": true,
+  "scripts": {
+    "test": "node api.test.js && node shim.test.js && node app.test.js",
+    "test:db": "sh db/run.sh"
+  },
+  "devDependencies": {
+    "jsdom": "^24.1.3"
+  }
+}
